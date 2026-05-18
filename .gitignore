@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 face_log.csv
-~/
-age_model_weights.h5
 *.caffemodel
+python
+face_age_tracker.py
+face_tracker.py
+face_tracker_simple.py
+_download_gender.py
+deploy_age.prototxt
+deploy_gender.prototxt
+gender_net.caffemodel

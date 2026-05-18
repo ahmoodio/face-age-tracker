@@ -1,86 +1,12 @@
-import cv2, csv, numpy as np, os, urllib.request
+import cv2, csv, numpy as np, os, urllib.request, warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
 from datetime import datetime
 from collections import defaultdict, Counter
-
-import warnings
 from deepface import DeepFace
-
-import tensorflow as tf
-from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import (
-    Convolution2D, ZeroPadding2D, MaxPooling2D,
-    Flatten, Dropout, Activation
-)
 
 SMOOTHING_WINDOW = 5
 AGE_MARGIN = 3
-
-
-def download_weights(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    url = "https://github.com/serengil/deepface_models/releases/download/v1.0/age_model_weights.h5"
-    print(f"Downloading age model weights (~539 MB) to {path}...")
-    urllib.request.urlretrieve(url, path)
-    print("Download complete.")
-
-def build_age_model():
-    base = Sequential()
-    base.add(ZeroPadding2D((1, 1), input_shape=(224, 224, 3)))
-    base.add(Convolution2D(64, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(64, (3, 3), activation="relu"))
-    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(128, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(128, (3, 3), activation="relu"))
-    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(256, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(256, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(256, (3, 3), activation="relu"))
-    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(ZeroPadding2D((1, 1)))
-    base.add(Convolution2D(512, (3, 3), activation="relu"))
-    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
-    base.add(Convolution2D(4096, (7, 7), activation="relu"))
-    base.add(Dropout(0.5))
-    base.add(Convolution2D(4096, (1, 1), activation="relu"))
-    base.add(Dropout(0.5))
-    base.add(Convolution2D(2622, (1, 1)))
-    base.add(Flatten())
-    base.add(Activation("softmax"))
-    out = Convolution2D(101, (1, 1), name="predictions")(base.layers[-4].output)
-    out = Flatten()(out)
-    out = Activation("softmax")(out)
-    model = Model(inputs=base.inputs, outputs=out)
-    weights = os.path.expanduser("~/.deepface/weights/age_model_weights.h5")
-    if not os.path.exists(weights):
-        download_weights(weights)
-    model.load_weights(weights)
-    return model
-
-
-def predict_age(face_img, model):
-    resized = cv2.resize(face_img, (224, 224))
-    batch = np.expand_dims(resized.astype(np.float32), 0)
-    probs = model(batch, training=False).numpy()[0, :]
-    return int(probs.argmax())
 
 
 class FaceTracker:
@@ -204,22 +130,9 @@ if not os.path.exists("deploy.prototxt"):
         "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
         "deploy.prototxt"
     )
-if not os.path.exists("deploy_gender.prototxt"):
-    urllib.request.urlretrieve(
-        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt",
-        "deploy_gender.prototxt"
-    )
-if not os.path.exists("gender_net.caffemodel"):
-    urllib.request.urlretrieve(
-        "https://www.dropbox.com/s/iyv483wz7ztr9gh/gender_net.caffemodel?dl=0",
-        "gender_net.caffemodel"
-    )
 
 face_net = cv2.dnn.readNetFromCaffe("deploy.prototxt", "res10_300x300_ssd_iter_140000.caffemodel")
-gender_net = cv2.dnn.readNetFromCaffe("deploy_gender.prototxt", "gender_net.caffemodel")
-print("Face detection + gender loaded. Loading age model (~539 MB)...")
-age_model = build_age_model()
-print("Age model loaded (argmax). Running every 60 frames.")
+print("Face detection loaded. DeepFace models (age, gender, emotion, race) will lazy-load on first use.")
 
 tracker = FaceTracker()
 
@@ -289,27 +202,22 @@ while True:
             if fid is None:
                 continue
 
-            age = predict_age(face_img, age_model)
-
-            blob_gender = cv2.dnn.blobFromImage(face_img, 1.0, (227, 227), (78.426, 87.768, 114.895), swapRB=False)
-            gender_net.setInput(blob_gender)
-            preds = gender_net.forward()[0]
-            gender = "Man" if preds[0] > preds[1] else "Woman"
-
-            tracker.update_age_gender(fid, age, gender)
-
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     result = DeepFace.analyze(
                         img_path=face_img,
-                        actions=['emotion', 'race'],
+                        actions=['age', 'gender', 'emotion', 'race'],
                         enforce_detection=False,
                         detector_backend='skip'
                     )
                 if result:
-                    emotion = result[0].get('dominant_emotion', '?')
-                    race = result[0].get('dominant_race', '?')
+                    r = result[0]
+                    age = int(r.get('age', 0))
+                    gender = r.get('dominant_gender', '?')
+                    emotion = r.get('dominant_emotion', '?')
+                    race = r.get('dominant_race', '?')
+                    tracker.update_age_gender(fid, age, gender)
                     tracker.update_emotion_race(fid, emotion, race)
             except Exception:
                 pass
