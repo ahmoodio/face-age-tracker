@@ -22,13 +22,21 @@ Detects faces from your webcam, tracks them across frames, and displays a stable
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/face-age-tracker
+git clone https://github.com/ahmoodio/face-age-tracker
 cd face-age-tracker
+```
 
+**Linux / macOS:**
+```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-# .venv\Scripts\activate    # Windows
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -54,7 +62,7 @@ The window shows:
 - Face ID, age range (e.g. `12-18yr`), and gender (`M`/`W`)
 - Face count and current camera index
 
-All data is logged to `face_log.csv` with columns: `timestamp, face_id, x, y, width, height, age_gender`.
+All data is logged to `face_log.csv` with columns: `timestamp, face_id, x, y, width, height, age, gender`.
 
 ## How It Works
 
