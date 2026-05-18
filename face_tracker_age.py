@@ -4,6 +4,9 @@ os.environ['QT_QPA_PLATFORM'] = 'xcb'
 from datetime import datetime
 from collections import defaultdict, Counter
 
+import warnings
+from deepface import DeepFace
+
 import tensorflow as tf
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.layers import (
@@ -87,19 +90,23 @@ class FaceTracker:
         self.disappeared = defaultdict(int)
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
-        self.age_gender_data = {}
+        self.face_data = {}
 
     def register(self, centroid):
         self.faces[self.next_id] = centroid
         self.disappeared[self.next_id] = 0
-        self.age_gender_data[self.next_id] = {"ages": [], "genders": [], "stable_age": None, "stable_gender": None}
+        self.face_data[self.next_id] = {
+            "ages": [], "genders": [], "emotions": [], "races": [],
+            "stable_age": None, "stable_gender": None,
+            "stable_emotion": None, "stable_race": None
+        }
         self.next_id += 1
 
     def deregister(self, face_id):
         del self.faces[face_id]
         del self.disappeared[face_id]
-        if face_id in self.age_gender_data:
-            del self.age_gender_data[face_id]
+        if face_id in self.face_data:
+            del self.face_data[face_id]
 
     def update(self, detections):
         if not detections:
@@ -147,9 +154,9 @@ class FaceTracker:
         return result
 
     def update_age_gender(self, face_id, age, gender):
-        if face_id not in self.age_gender_data:
+        if face_id not in self.face_data:
             return
-        data = self.age_gender_data[face_id]
+        data = self.face_data[face_id]
         data["ages"].append(int(age))
         data["genders"].append(gender)
         if len(data["ages"]) > SMOOTHING_WINDOW:
@@ -160,11 +167,26 @@ class FaceTracker:
         if data["genders"]:
             data["stable_gender"] = Counter(data["genders"]).most_common(1)[0][0]
 
-    def get_stable_age_gender(self, face_id):
-        if face_id not in self.age_gender_data:
-            return None, None
-        d = self.age_gender_data[face_id]
-        return d.get("stable_age"), d.get("stable_gender")
+    def update_emotion_race(self, face_id, emotion, race):
+        if face_id not in self.face_data:
+            return
+        data = self.face_data[face_id]
+        data["emotions"].append(emotion)
+        data["races"].append(race)
+        if len(data["emotions"]) > SMOOTHING_WINDOW:
+            data["emotions"].pop(0)
+        if len(data["races"]) > SMOOTHING_WINDOW:
+            data["races"].pop(0)
+        if data["emotions"]:
+            data["stable_emotion"] = Counter(data["emotions"]).most_common(1)[0][0]
+        if data["races"]:
+            data["stable_race"] = Counter(data["races"]).most_common(1)[0][0]
+
+    def get_stable_data(self, face_id):
+        if face_id not in self.face_data:
+            return None, None, None, None
+        d = self.face_data[face_id]
+        return d.get("stable_age"), d.get("stable_gender"), d.get("stable_emotion"), d.get("stable_race")
 
 
 def get_gender_short(gender):
@@ -203,7 +225,7 @@ tracker = FaceTracker()
 
 csv_file = open("face_log.csv", "w", newline="")
 csv_writer = csv.writer(csv_file)
-csv_writer.writerow(["timestamp", "face_id", "x", "y", "width", "height", "age", "gender"])
+csv_writer.writerow(["timestamp", "face_id", "x", "y", "width", "height", "age", "gender", "emotion", "race"])
 
 cam_idx = 0
 cap = cv2.VideoCapture(cam_idx)
@@ -276,10 +298,26 @@ while True:
 
             tracker.update_age_gender(fid, age, gender)
 
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    result = DeepFace.analyze(
+                        img_path=face_img,
+                        actions=['emotion', 'race'],
+                        enforce_detection=False,
+                        detector_backend='skip'
+                    )
+                if result:
+                    emotion = result[0].get('dominant_emotion', '?')
+                    race = result[0].get('dominant_race', '?')
+                    tracker.update_emotion_race(fid, emotion, race)
+            except Exception:
+                pass
+
     for idx, item in enumerate(tracked):
         fid, x, y, bw, bh = item
         label = f"Face #{fid}"
-        stable_age, stable_gender = tracker.get_stable_age_gender(fid)
+        stable_age, stable_gender, stable_emotion, stable_race = tracker.get_stable_data(fid)
         age_text = ""
         if stable_age is not None:
             lo = max(0, stable_age - AGE_MARGIN)
@@ -288,10 +326,20 @@ while True:
             age_text = f"{lo}-{hi}yr {gender_str}"
             label += f" {age_text}"
 
+        sub = ""
+        if stable_emotion:
+            sub += f"{stable_emotion}"
+        if stable_race:
+            if sub: sub += " | "
+            sub += f"{stable_race}"
+
         cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
         cv2.putText(frame, label, (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-        csv_writer.writerow([ts, fid, x, y, bw, bh, stable_age, stable_gender])
+        if sub:
+            cv2.putText(frame, sub, (x, y - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
+        csv_writer.writerow([ts, fid, x, y, bw, bh, stable_age, stable_gender, stable_emotion, stable_race])
 
     cv2.putText(frame, f"Faces: {len(tracked)}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
