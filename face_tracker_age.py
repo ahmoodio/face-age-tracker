@@ -132,7 +132,15 @@ if not os.path.exists("deploy.prototxt"):
     )
 
 face_net = cv2.dnn.readNetFromCaffe("deploy.prototxt", "res10_300x300_ssd_iter_140000.caffemodel")
-print("Face detection loaded. DeepFace models (age, gender, emotion, race) will lazy-load on first use.")
+
+print("Loading DeepFace models (age, gender, emotion, race)...")
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    DeepFace.build_model(model_name="Age", task="facial_attribute")
+    DeepFace.build_model(model_name="Gender", task="facial_attribute")
+    DeepFace.build_model(model_name="Emotion", task="facial_attribute")
+    DeepFace.build_model(model_name="Race", task="facial_attribute")
+print("All models loaded. Running every 60 frames.")
 
 tracker = FaceTracker()
 
@@ -217,7 +225,8 @@ while True:
                         img_path=face_img,
                         actions=['age', 'gender', 'emotion', 'race'],
                         enforce_detection=False,
-                        detector_backend='skip'
+                        detector_backend='skip',
+                        silent=True
                     )
                 if result:
                     r = result[0]
