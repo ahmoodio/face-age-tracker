@@ -141,7 +141,15 @@ csv_writer = csv.writer(csv_file)
 csv_writer.writerow(["timestamp", "face_id", "x", "y", "width", "height", "age", "gender", "emotion", "race"])
 
 cam_idx = 0
-cap = cv2.VideoCapture(cam_idx)
+for i in range(10):
+    cap = cv2.VideoCapture(i)
+    if cap.isOpened():
+        cam_idx = i
+        break
+    cap.release()
+else:
+    cam_idx = 0
+    cap = cv2.VideoCapture(0)
 frame_count = 0
 
 
