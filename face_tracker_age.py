@@ -1,12 +1,83 @@
-import cv2, csv, numpy as np, os, urllib.request, warnings
+import cv2, csv, numpy as np, os, urllib.request
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
 from datetime import datetime
 from collections import defaultdict, Counter
-from deepface import DeepFace
+
+import tensorflow as tf
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras.layers import (
+    Convolution2D, ZeroPadding2D, MaxPooling2D,
+    Flatten, Dropout, Activation
+)
 
 SMOOTHING_WINDOW = 5
 AGE_MARGIN = 3
+
+
+def download_weights(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    url = "https://github.com/serengil/deepface_models/releases/download/v1.0/age_model_weights.h5"
+    print(f"Downloading age model weights (~539 MB) to {path}...")
+    urllib.request.urlretrieve(url, path)
+    print("Download complete.")
+
+def build_age_model():
+    base = Sequential()
+    base.add(ZeroPadding2D((1, 1), input_shape=(224, 224, 3)))
+    base.add(Convolution2D(64, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(64, (3, 3), activation="relu"))
+    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(128, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(128, (3, 3), activation="relu"))
+    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(256, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(256, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(256, (3, 3), activation="relu"))
+    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(ZeroPadding2D((1, 1)))
+    base.add(Convolution2D(512, (3, 3), activation="relu"))
+    base.add(MaxPooling2D((2, 2), strides=(2, 2)))
+    base.add(Convolution2D(4096, (7, 7), activation="relu"))
+    base.add(Dropout(0.5))
+    base.add(Convolution2D(4096, (1, 1), activation="relu"))
+    base.add(Dropout(0.5))
+    base.add(Convolution2D(2622, (1, 1)))
+    base.add(Flatten())
+    base.add(Activation("softmax"))
+    out = Convolution2D(101, (1, 1), name="predictions")(base.layers[-4].output)
+    out = Flatten()(out)
+    out = Activation("softmax")(out)
+    model = Model(inputs=base.inputs, outputs=out)
+    weights = os.path.expanduser("~/.deepface/weights/age_model_weights.h5")
+    if not os.path.exists(weights):
+        download_weights(weights)
+    model.load_weights(weights)
+    return model
+
+
+def predict_age(face_img, model):
+    resized = cv2.resize(face_img, (224, 224))
+    batch = np.expand_dims(resized.astype(np.float32), 0)
+    probs = model(batch, training=False).numpy()[0, :]
+    return int(probs.argmax())
 
 
 class FaceTracker:
@@ -16,23 +87,19 @@ class FaceTracker:
         self.disappeared = defaultdict(int)
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
-        self.face_data = {}
+        self.age_gender_data = {}
 
     def register(self, centroid):
         self.faces[self.next_id] = centroid
         self.disappeared[self.next_id] = 0
-        self.face_data[self.next_id] = {
-            "ages": [], "genders": [], "emotions": [], "races": [],
-            "stable_age": None, "stable_gender": None,
-            "stable_emotion": None, "stable_race": None
-        }
+        self.age_gender_data[self.next_id] = {"ages": [], "genders": [], "stable_age": None, "stable_gender": None}
         self.next_id += 1
 
     def deregister(self, face_id):
         del self.faces[face_id]
         del self.disappeared[face_id]
-        if face_id in self.face_data:
-            del self.face_data[face_id]
+        if face_id in self.age_gender_data:
+            del self.age_gender_data[face_id]
 
     def update(self, detections):
         if not detections:
@@ -80,9 +147,9 @@ class FaceTracker:
         return result
 
     def update_age_gender(self, face_id, age, gender):
-        if face_id not in self.face_data:
+        if face_id not in self.age_gender_data:
             return
-        data = self.face_data[face_id]
+        data = self.age_gender_data[face_id]
         data["ages"].append(int(age))
         data["genders"].append(gender)
         if len(data["ages"]) > SMOOTHING_WINDOW:
@@ -93,26 +160,11 @@ class FaceTracker:
         if data["genders"]:
             data["stable_gender"] = Counter(data["genders"]).most_common(1)[0][0]
 
-    def update_emotion_race(self, face_id, emotion, race):
-        if face_id not in self.face_data:
-            return
-        data = self.face_data[face_id]
-        data["emotions"].append(emotion)
-        data["races"].append(race)
-        if len(data["emotions"]) > SMOOTHING_WINDOW:
-            data["emotions"].pop(0)
-        if len(data["races"]) > SMOOTHING_WINDOW:
-            data["races"].pop(0)
-        if data["emotions"]:
-            data["stable_emotion"] = Counter(data["emotions"]).most_common(1)[0][0]
-        if data["races"]:
-            data["stable_race"] = Counter(data["races"]).most_common(1)[0][0]
-
-    def get_stable_data(self, face_id):
-        if face_id not in self.face_data:
-            return None, None, None, None
-        d = self.face_data[face_id]
-        return d.get("stable_age"), d.get("stable_gender"), d.get("stable_emotion"), d.get("stable_race")
+    def get_stable_age_gender(self, face_id):
+        if face_id not in self.age_gender_data:
+            return None, None
+        d = self.age_gender_data[face_id]
+        return d.get("stable_age"), d.get("stable_gender")
 
 
 def get_gender_short(gender):
@@ -130,23 +182,28 @@ if not os.path.exists("deploy.prototxt"):
         "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
         "deploy.prototxt"
     )
+if not os.path.exists("deploy_gender.prototxt"):
+    urllib.request.urlretrieve(
+        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt",
+        "deploy_gender.prototxt"
+    )
+if not os.path.exists("gender_net.caffemodel"):
+    urllib.request.urlretrieve(
+        "https://www.dropbox.com/s/iyv483wz7ztr9gh/gender_net.caffemodel?dl=0",
+        "gender_net.caffemodel"
+    )
 
 face_net = cv2.dnn.readNetFromCaffe("deploy.prototxt", "res10_300x300_ssd_iter_140000.caffemodel")
-
-print("Loading DeepFace models (age, gender, emotion, race)...")
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    DeepFace.build_model(model_name="Age", task="facial_attribute")
-    DeepFace.build_model(model_name="Gender", task="facial_attribute")
-    DeepFace.build_model(model_name="Emotion", task="facial_attribute")
-    DeepFace.build_model(model_name="Race", task="facial_attribute")
-print("All models loaded. Running every 60 frames.")
+gender_net = cv2.dnn.readNetFromCaffe("deploy_gender.prototxt", "gender_net.caffemodel")
+print("Face detection + gender loaded. Loading age model (~539 MB)...")
+age_model = build_age_model()
+print("Age model loaded (argmax). Running every 60 frames.")
 
 tracker = FaceTracker()
 
 csv_file = open("face_log.csv", "w", newline="")
 csv_writer = csv.writer(csv_file)
-csv_writer.writerow(["timestamp", "face_id", "x", "y", "width", "height", "age", "gender", "emotion", "race"])
+csv_writer.writerow(["timestamp", "face_id", "x", "y", "width", "height", "age", "gender"])
 
 cam_idx = 0
 for i in range(10):
@@ -218,31 +275,19 @@ while True:
             if fid is None:
                 continue
 
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    result = DeepFace.analyze(
-                        img_path=face_img,
-                        actions=['age', 'gender', 'emotion', 'race'],
-                        enforce_detection=False,
-                        detector_backend='skip',
-                        silent=True
-                    )
-                if result:
-                    r = result[0]
-                    age = int(r.get('age', 0))
-                    gender = r.get('dominant_gender', '?')
-                    emotion = r.get('dominant_emotion', '?')
-                    race = r.get('dominant_race', '?')
-                    tracker.update_age_gender(fid, age, gender)
-                    tracker.update_emotion_race(fid, emotion, race)
-            except Exception:
-                pass
+            age = predict_age(face_img, age_model)
+
+            blob_gender = cv2.dnn.blobFromImage(face_img, 1.0, (227, 227), (78.426, 87.768, 114.895), swapRB=False)
+            gender_net.setInput(blob_gender)
+            preds = gender_net.forward()[0]
+            gender = "Man" if preds[0] > preds[1] else "Woman"
+
+            tracker.update_age_gender(fid, age, gender)
 
     for idx, item in enumerate(tracked):
         fid, x, y, bw, bh = item
         label = f"Face #{fid}"
-        stable_age, stable_gender, stable_emotion, stable_race = tracker.get_stable_data(fid)
+        stable_age, stable_gender = tracker.get_stable_age_gender(fid)
         age_text = ""
         if stable_age is not None:
             lo = max(0, stable_age - AGE_MARGIN)
@@ -251,20 +296,10 @@ while True:
             age_text = f"{lo}-{hi}yr {gender_str}"
             label += f" {age_text}"
 
-        sub = ""
-        if stable_emotion:
-            sub += f"{stable_emotion}"
-        if stable_race:
-            if sub: sub += " | "
-            sub += f"{stable_race}"
-
         cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
         cv2.putText(frame, label, (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-        if sub:
-            cv2.putText(frame, sub, (x, y - 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
-        csv_writer.writerow([ts, fid, x, y, bw, bh, stable_age, stable_gender, stable_emotion, stable_race])
+        csv_writer.writerow([ts, fid, x, y, bw, bh, stable_age, stable_gender])
 
     cv2.putText(frame, f"Faces: {len(tracked)}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
